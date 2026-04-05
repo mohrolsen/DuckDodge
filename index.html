@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Duck Apple Dodge</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+// ─── Canvas ───────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const VW = 800, VH = 500;
+canvas.width = VW; canvas.height = VH;
+
+function resize() {
+  const s = Math.min(window.innerWidth / VW, window.innerHeight / VH);
+  canvas.style.width  = Math.floor(VW * s) + 'px';
+  canvas.style.height = Math.floor(VH * s) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Constants ────────────────────────────────────────────
+const GROUND_Y  = 415;
+const GRASS_H   = 18;
+const DUCK_W    = 36;
+const DUCK_H    = 30;
+const DUCK_SPD  = 250;
+const JUMP_H    = 48;
+const JUMP_DUR  = 0.46;
+
+const TREES = [
+  { x:  85, th:  95, cw:  95, ch: 105 },
+  { x: 235, th:  80, cw:  82, ch:  88 },
+  { x: 390, th: 105, cw: 100, ch: 112 },
+  { x: 560, th:  88, cw:  90, ch:  96 },
+  { x: 715, th:  78, cw:  78, ch:  84 },
+];
+const CLOUDS = [
+  { x:  90, y: 55, w:  84, h: 30 },
+  { x: 340, y: 38, w: 104, h: 36 },
+  { x: 590, y: 65, w:  78, h: 28 },
+];
+// Fixed star positions for night sky
+const STARS = [[80,30],[200,15],[350,50],[500,20],[650,40],[730,25],
+               [120,80],[420,65],[580,85],[280,45],[470,28],[160,60]];
+
+// ─── Audio ────────────────────────────────────────────────
+let audioCtx = null;
+function getACtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+function beep(freq, dur, type, vol, freqEnd) {
+  type = type || 'square'; vol = vol || 0.22;
+  freqEnd = (freqEnd !== undefined) ? freqEnd : null;
+  try {
+    const ac = getACtx();
+    if (ac.state === 'suspended') ac.resume();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.connect(g); g.connect(ac.destination);
+    o.type = type;
+    o.frequency.setValueAtTime(freq, ac.currentTime);
+    if (freqEnd !== null) o.frequency.linearRampToValueAtTime(freqEnd, ac.currentTime + dur);
+    g.gain.setValueAtTime(vol, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    o.start(ac.currentTime); o.stop(ac.currentTime + dur + 0.01);
+  } catch(e) {}
+}
+const SND = {
+  jump:      () => beep(330, 0.09, 'square', 0.18, 580),
+  land:      () => beep(90,  0.08, 'square', 0.26),
+  golden:    () => { beep(880,0.08,'triangle',0.2); setTimeout(()=>beep(1100,0.1,'triangle',0.15),80); },
+  death:     () => beep(440, 0.38, 'square', 0.38, 100),
+  milestone: () => {
+    beep(523,0.08,'square',0.2);
+    setTimeout(()=>beep(659,0.08,'square',0.2),95);
+    setTimeout(()=>beep(784,0.14,'square',0.25),190);
+  },
+  shield:    () => {
+    beep(440,0.06,'square',0.2);
+    setTimeout(()=>beep(660,0.06,'square',0.22),70);
+    setTimeout(()=>beep(880,0.12,'square',0.28),140);
+  },
+  shielded:  () => beep(180, 0.14, 'square', 0.22, 80),
+  combo:     () => {
+    beep(523,0.07,'square',0.25);
+    setTimeout(()=>beep(659,0.07,'square',0.25),80);
+    setTimeout(()=>beep(784,0.07,'square',0.25),160);
+    setTimeout(()=>beep(1047,0.2,'square',0.32),240);
+  },
+  rain:      () => {
+    beep(220,0.1,'square',0.28,440);
+    setTimeout(()=>beep(220,0.1,'square',0.28,440),200);
+    setTimeout(()=>beep(220,0.1,'square',0.28,440),400);
+  },
+  wind:      () => beep(110, 0.6, 'sawtooth', 0.07, 260),
+};
+
+// ─── Apple type definitions ───────────────────────────────
+const APPLE_DEF = {
+  small:  { size: 18, pts: 1, spd: 370, w: 38 },
+  normal: { size: 28, pts: 1, spd: 230, w: 43 },
+  golden: { size: 28, pts: 2, spd: 210, w: 14 },
+  shield: { size: 24, pts: 0, spd: 185, w:  5 },
+};
+
+// ─── Game state ───────────────────────────────────────────
+let state       = 'playing';  // 'playing' | 'dying' | 'dead'
+let score       = 0;
+let highScore   = parseInt(localStorage.getItem('duckAppleHS') || '0');
+let gameTime    = 0;
+let lastDiffUp  = 0;
+let speedMult   = 1.0;
+let spawnMs     = 1200;
+let lastSpawnTs = 0;
+let apples      = [];
+let splats      = [];          // { x, y, age, col, sz }
+
+// Combo
+let combo       = 0;
+let comboX2     = false;
+let comboFlashT = 0;           // countdown; flash text visible while > 0
+
+// Shield
+let shieldActive    = false;
+let shieldTimer     = 0;
+let shieldOnScreen  = false;
+
+// Wind
+let windActive  = false;
+let windVel     = 0;           // px/s, positive = right
+let windTimer   = 0;
+let lastWindT   = 0;           // gameTime when last wind started
+let windStreaks  = [];          // { x, y, len }
+
+// Screen shake
+let shakeT   = 0;
+let shakeAmt = 0;
+
+// Apple rain / storm
+let rainMilestone = 50;
+let rainWarnT     = 0;
+
+// Death animation
+let deathT = 0;
+
+// ─── Duck ─────────────────────────────────────────────────
+let duck = {};
+function resetDuck() {
+  duck.x        = VW / 2 - DUCK_W / 2;
+  duck.y        = GROUND_Y - DUCK_H;
+  duck.right    = true;
+  duck.jumping  = false;
+  duck.jumpT    = 0;
+  duck.jumpOff  = 0;
+  duck.walkAnim = 0;
+}
+resetDuck();
+
+// ─── Input ────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', function(e) {
+  if (['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].indexOf(e.code) !== -1) e.preventDefault();
+  if (!keys[e.code] && e.code === 'Space' && !duck.jumping && state === 'playing') {
+    duck.jumping = true; duck.jumpT = 0; SND.jump();
+  }
+  keys[e.code] = true;
+});
+window.addEventListener('keyup', function(e) { keys[e.code] = false; });
+
+// Respawn button
+const BTN = { x: VW/2-110, y: VH/2+90, w: 220, h: 52 };
+canvas.addEventListener('click', function(e) {
+  if (state !== 'dead') return;
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (VW / rect.width);
+  const cy = (e.clientY - rect.top)  * (VH / rect.height);
+  if (cx >= BTN.x && cx <= BTN.x+BTN.w && cy >= BTN.y && cy <= BTN.y+BTN.h) respawn();
+});
+canvas.addEventListener('mousemove', function(e) {
+  if (state !== 'dead') { canvas.style.cursor = 'default'; return; }
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (VW / rect.width);
+  const cy = (e.clientY - rect.top)  * (VH / rect.height);
+  canvas.style.cursor =
+    (cx >= BTN.x && cx <= BTN.x+BTN.w && cy >= BTN.y && cy <= BTN.y+BTN.h) ? 'pointer' : 'default';
+});
+
+// ─── Apple helpers ────────────────────────────────────────
+function pickType() {
+  var rv = Math.random() * 100;
+  if (rv < 38) return 'small';
+  if (rv < 81) return 'normal';
+  if (rv < 95) return 'golden';
+  return shieldOnScreen ? 'small' : 'shield';
+}
+
+function makeApple(type, xPos, startY) {
+  const D = APPLE_DEF[type];
+  if (xPos === undefined) xPos = D.size + Math.random() * (VW - D.size * 2);
+  if (startY === undefined) startY = -D.size - 5;
+  if (type === 'shield') shieldOnScreen = true;
+  return {
+    type    : type,
+    x       : xPos,
+    y       : startY,
+    size    : D.size,
+    pts     : D.pts,
+    spd     : D.spd * speedMult,
+    velX    : windActive ? windVel : 0,
+    bouncing: false,
+    bounceV : 0,
+  };
+}
+
+function spawnApple(now) {
+  lastSpawnTs = now;
+  apples.push(makeApple(pickType()));
+}
+
+function spawnRain() {
+  SND.rain();
+  rainWarnT = 1.8;
+  for (var i = 0; i < 9; i++) {
+    var xPos = VW * (i + 0.5) / 9 + (Math.random() - 0.5) * 40;
+    xPos = Math.max(30, Math.min(VW - 30, xPos));
+    var type = (i === 4) ? 'golden' : 'normal';
+    var a = makeApple(type, xPos);
+    a.y = -(i % 3) * 45 - 10;
+    apples.push(a);
+  }
+}
+
+function addSplat(a) {
+  splats.push({
+    x: a.x, y: GROUND_Y + 2, age: 0,
+    col: a.type === 'golden' ? '#BB7700' : a.type === 'shield' ? '#0055AA' : '#880000',
+    sz: a.size,
+  });
+}
+
+// ─── Respawn ──────────────────────────────────────────────
+function respawn() {
+  score = 0; gameTime = 0; lastDiffUp = 0; speedMult = 1.0;
+  spawnMs = 1200; lastSpawnTs = 0; apples = []; splats = [];
+  combo = 0; comboX2 = false; comboFlashT = 0;
+  shieldActive = false; shieldTimer = 0; shieldOnScreen = false;
+  windActive = false; windVel = 0; windTimer = 0;
+  lastWindT = 0; windStreaks = [];
+  shakeT = 0; shakeAmt = 0;
+  rainMilestone = 50; rainWarnT = 0; deathT = 0;
+  state = 'playing';
+  canvas.style.cursor = 'default';
+  resetDuck();
+}
+
+// ─── Sky colour helpers (day/night cycle, 300 s period) ───
+// t=0..100 day, 100..180 sunset, 180..250 night, 250..300 dawn→day
+const SKY_KF = [
+  { t:   0, c: ['#1A4A8A','#2E6BB0','#5090CC'] },
+  { t: 100, c: ['#8B3A00','#CC5500','#FF8833'] },
+  { t: 180, c: ['#080820','#121240','#1C2060'] },
+  { t: 250, c: ['#3A1A5A','#663380','#9955AA'] },
+  { t: 300, c: ['#1A4A8A','#2E6BB0','#5090CC'] },
+];
+function lerp3(c1, c2, t) {
+  function p(c){ return [parseInt(c.slice(1,3),16),parseInt(c.slice(3,5),16),parseInt(c.slice(5,7),16)]; }
+  function h(n){ var s=Math.round(n).toString(16); return s.length<2?'0'+s:s; }
+  var a=p(c1),b=p(c2);
+  return '#'+h(a[0]+(b[0]-a[0])*t)+h(a[1]+(b[1]-a[1])*t)+h(a[2]+(b[2]-a[2])*t);
+}
+function getSky() {
+  var t = gameTime % 300;
+  for (var i=0; i<SKY_KF.length-1; i++) {
+    var k0=SKY_KF[i], k1=SKY_KF[i+1];
+    if (t >= k0.t && t < k1.t) {
+      var f = (t-k0.t)/(k1.t-k0.t);
+      return [lerp3(k0.c[0],k1.c[0],f), lerp3(k0.c[1],k1.c[1],f), lerp3(k0.c[2],k1.c[2],f)];
+    }
+  }
+  return SKY_KF[0].c;
+}
+function nightFactor() {
+  // 0 = full day, 1 = full night
+  var t = gameTime % 300;
+  if (t < 100) return 0;
+  if (t < 180) return (t-100)/80;
+  if (t < 250) return 1;
+  return 1-(t-250)/50;
+}
+
+// ─── Update ───────────────────────────────────────────────
+let lastTime = null;
+function update(now) {
+  if (lastTime === null) lastTime = now;
+  var dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  // Death animation
+  if (state === 'dying') {
+    deathT += dt;
+    if (deathT >= 0.45) state = 'dead';
+    return;
+  }
+  if (state !== 'playing') return;
+
+  gameTime += dt;
+
+  // Difficulty ramp every 60 s
+  if (gameTime - lastDiffUp >= 60) {
+    lastDiffUp = gameTime;
+    speedMult *= 1.15;
+    spawnMs = Math.max(380, spawnMs * 0.87);
+    for (var di=0; di<apples.length; di++) {
+      if (!apples[di].bouncing) apples[di].spd = APPLE_DEF[apples[di].type].spd * speedMult;
+    }
+  }
+
+  // Shield timer
+  if (shieldActive) { shieldTimer -= dt; if (shieldTimer <= 0) shieldActive = false; }
+
+  // Combo flash countdown
+  if (comboFlashT > 0) comboFlashT -= dt;
+
+  // Wind gust — trigger every 30 s
+  if (!windActive && gameTime - lastWindT >= 30) {
+    windActive = true;
+    lastWindT  = gameTime;
+    windTimer  = 2.5;
+    windVel    = (Math.random() < 0.5 ? 1 : -1) * (160 + Math.random() * 80);
+    windStreaks = [];
+    for (var ws=0; ws<7; ws++) {
+      windStreaks.push({ x: Math.random()*VW, y: 20+Math.random()*380, len: 55+Math.random()*90 });
+    }
+    for (var wa=0; wa<apples.length; wa++) { if (!apples[wa].bouncing) apples[wa].velX = windVel; }
+    SND.wind();
+  }
+  if (windActive) {
+    windTimer -= dt;
+    // Animate streaks across screen
+    for (var wsi=0; wsi<windStreaks.length; wsi++) {
+      windStreaks[wsi].x += windVel * dt * 0.7;
+      if (windStreaks[wsi].x > VW+120) windStreaks[wsi].x -= VW+240;
+      if (windStreaks[wsi].x < -120)   windStreaks[wsi].x += VW+240;
+    }
+    if (windTimer <= 0) {
+      windActive = false; windVel = 0;
+      for (var we=0; we<apples.length; we++) apples[we].velX = 0;
+    }
+  }
+
+  // Rain warning countdown
+  if (rainWarnT > 0) rainWarnT -= dt;
+
+  // Screen shake decay
+  if (shakeT > 0) shakeT -= dt;
+
+  // Duck movement
+  var moving = false;
+  if (keys['ArrowLeft'])  { duck.x -= DUCK_SPD * dt; duck.right = false; moving = true; }
+  if (keys['ArrowRight']) { duck.x += DUCK_SPD * dt; duck.right = true;  moving = true; }
+  duck.x = Math.max(0, Math.min(VW - DUCK_W, duck.x));
+  if (moving) duck.walkAnim += dt * 9;
+
+  // Jump arc (parabola)
+  if (duck.jumping) {
+    duck.jumpT += dt;
+    var jt = Math.min(duck.jumpT / JUMP_DUR, 1);
+    duck.jumpOff = JUMP_H * 4 * jt * (1 - jt);
+    if (duck.jumpT >= JUMP_DUR) { duck.jumping = false; duck.jumpOff = 0; }
+  }
+
+  // Normal spawn
+  if (now - lastSpawnTs >= spawnMs) spawnApple(now);
+
+  // Apple rain milestone
+  if (score >= rainMilestone) {
+    rainMilestone += 50;
+    spawnRain();
+  }
+
+  // ── Apple loop ────────────────────────────────────────
+  for (var i = apples.length - 1; i >= 0; i--) {
+    var a = apples[i];
+
+    // Horizontal drift (wind / bounce carry)
+    a.x += a.velX * dt;
+    if (a.x < a.size)       { a.x = a.size;       a.velX =  Math.abs(a.velX); }
+    if (a.x > VW - a.size)  { a.x = VW - a.size;  a.velX = -Math.abs(a.velX); }
+
+    // Vertical movement
+    if (a.bouncing) {
+      a.bounceV += 650 * dt;   // gravity
+      a.y += a.bounceV * dt;
+      if (a.y + a.size >= GROUND_Y) {
+        // Second landing: remove
+        if (a.type === 'shield') shieldOnScreen = false;
+        addSplat(a);
+        apples.splice(i, 1);
+        continue;
+      }
+    } else {
+      a.y += a.spd * dt;
+    }
+
+    // Collision with duck (AABB, inset 3 px)
+    var dL = duck.x + 3,              dR = duck.x + DUCK_W - 3;
+    var dT = duck.y - duck.jumpOff + 3, dB = duck.y - duck.jumpOff + DUCK_H - 2;
+    var aL = a.x - a.size * 0.42,    aR = a.x + a.size * 0.42;
+    var aT = a.y,                     aB = a.y + a.size;
+
+    if (aR > dL && aL < dR && aB > dT && aT < dB) {
+      if (a.type === 'shield') {
+        // Collect shield power-up
+        SND.shield();
+        shieldActive = true; shieldTimer = 3;
+        shieldOnScreen = false;
+        apples.splice(i, 1);
+        continue;
+      }
+      if (shieldActive) {
+        // Shield absorbs the hit
+        SND.shielded();
+        combo = 0;  // saved by shield — combo breaks
+        addSplat(a);
+        if (a.type === 'shield') shieldOnScreen = false;
+        apples.splice(i, 1);
+        continue;
+      }
+      // Duck dies
+      SND.death();
+      if (score > highScore) { highScore = score; localStorage.setItem('duckAppleHS', highScore); }
+      state = 'dying'; deathT = 0;
+      return;
+    }
+
+    // Apple hits ground (first time, not yet bouncing)
+    if (!a.bouncing && a.y + a.size >= GROUND_Y) {
+      // Shield type just disappears on ground hit
+      if (a.type === 'shield') {
+        shieldOnScreen = false;
+        addSplat(a);
+        apples.splice(i, 1);
+        continue;
+      }
+
+      // Score
+      var prev = score;
+      score += a.pts * (comboX2 ? 2 : 1);
+
+      // Combo
+      combo++;
+      if (combo === 10 && !comboX2) {
+        comboX2 = true; comboFlashT = 2.2;
+        SND.combo();
+      }
+
+      if (a.type === 'golden') SND.golden();
+      else                     SND.land();
+      if (Math.floor(score/10) > Math.floor(prev/10)) SND.milestone();
+      if (score > highScore) { highScore = score; localStorage.setItem('duckAppleHS', highScore); }
+
+      // Screen shake if apple landed close to duck
+      var distX = Math.abs(a.x - (duck.x + DUCK_W/2));
+      if (distX < 110) {
+        shakeT   = 0.13;
+        shakeAmt = Math.max(2, 5 - distX / 25);
+      }
+
+      // Bounce
+      addSplat(a);
+      a.bouncing = true;
+      a.bounceV  = -(a.spd * 0.42);           // bounce up at 42% of fall speed
+      a.y        = GROUND_Y - a.size;
+      a.velX     = (Math.random() - 0.5) * 70; // slight random horizontal
+      a.spd      = 0;
+    }
+  }
+
+  // Age splats
+  for (var si = splats.length - 1; si >= 0; si--) {
+    splats[si].age += dt;
+    if (splats[si].age >= 1.8) splats.splice(si, 1);
+  }
+}
+
+// ─── Draw helper ──────────────────────────────────────────
+function r(x, y, w, h, col) {
+  ctx.fillStyle = col;
+  ctx.fillRect(Math.round(x), Math.round(y), w, h);
+}
+
+// ─── Draw: background ─────────────────────────────────────
+function drawBG() {
+  var sky = getSky();
+  var nf  = nightFactor();
+
+  // Sky bands
+  r(0,   0, VW, 150, sky[0]);
+  r(0, 150, VW, 140, sky[1]);
+  r(0, 290, VW, 125, sky[2]);
+
+  // Stars (fade in with night)
+  if (nf > 0.1) {
+    ctx.globalAlpha = nf * 0.8;
+    ctx.fillStyle = '#FFFFFF';
+    for (var si=0; si<STARS.length; si++) ctx.fillRect(STARS[si][0], STARS[si][1], 2, 2);
+    ctx.globalAlpha = 1;
+  }
+
+  // Moon (night only)
+  if (nf > 0.2) {
+    ctx.globalAlpha = Math.min(1, (nf-0.2)/0.3);
+    r(670, 28, 32, 32, '#CCCC88');
+    r(672, 30, 28, 28, '#DDDDAA');
+    r(676, 28, 10,  5, sky[0]); // crater-like cutout
+    ctx.globalAlpha = 1;
+  }
+
+  // Clouds (tint with night)
+  var cc = nf > 0.5 ? '#1A2A4A' : '#E0E8FF';
+  var ch = nf > 0.5 ? '#222E50' : '#FFFFFF';
+  for (var ci=0; ci<CLOUDS.length; ci++) {
+    var c = CLOUDS[ci];
+    r(c.x+c.w*0.2, c.y,           c.w*0.6,  c.h*0.55, cc);
+    r(c.x,         c.y+c.h*0.3,   c.w,      c.h*0.7,  cc);
+    r(c.x+c.w*0.12,c.y+c.h*0.1,  c.w*0.28, c.h*0.45, ch);
+  }
+
+  // Wind streaks
+  if (windActive) {
+    var wa = Math.min(1, windTimer/0.4) * 0.55;
+    ctx.fillStyle = 'rgba(200,225,255,' + wa + ')';
+    for (var wi=0; wi<windStreaks.length; wi++) {
+      var ws = windStreaks[wi];
+      var d  = windVel > 0 ? 1 : -1;
+      ctx.fillRect(Math.round(ws.x), Math.round(ws.y), Math.round(d*ws.len), 2);
+      ctx.fillRect(Math.round(ws.x + d*18), Math.round(ws.y+5), Math.round(d*ws.len*0.6), 1);
+    }
+  }
+
+  // Trees
+  for (var ti=0; ti<TREES.length; ti++) drawTree(TREES[ti], nf);
+}
+
+function drawTree(t, nf) {
+  var x=t.x, th=t.th, cw=t.cw, ch=t.ch, tw=16, base=GROUND_Y;
+  var cx=x-cw/2, cy=base-th-ch+12;
+
+  var trkC = nf>0.5 ? '#4A2A10' : '#7A4A2A';
+  var trkD = nf>0.5 ? '#2A1000' : '#5A3010';
+  var cnB  = nf>0.5 ? '#0A3312' : '#1A6622';
+  var cnL  = nf>0.5 ? '#0E4018' : '#279933';
+  var cnD  = nf>0.5 ? '#061A09' : '#0D4414';
+  var apC  = nf>0.5 ? '#660000' : '#CC3300';
+
+  r(x-tw/2,      base-th,      tw, th,     trkC);
+  r(x-tw/2+4,    base-th+8,    4,  th-14,  trkD);
+  r(cx,          cy,           cw, ch,     cnB);
+  r(cx+8,        cy+6,         18, 16,     cnL);
+  r(cx+cw-28,    cy+10,        18, 14,     cnL);
+  r(cx+10,       cy+ch-24,     22, 18,     cnL);
+  r(cx,          cy+ch-14,     20, 14,     cnD);
+  r(cx+cw-20,    cy+ch-12,     20, 12,     cnD);
+  r(x-14, cy+ch*0.35, 8, 8, apC);
+  r(x+8,  cy+ch*0.55, 6, 6, apC);
+  if (cw>86) r(x-22, cy+ch*0.6, 7, 7, apC);
+}
+
+// ─── Draw: ground ─────────────────────────────────────────
+function drawGround() {
+  var nf = nightFactor();
+  var dirtC  = nf>0.5 ? '#4A3018' : '#7A5230';
+  var grassC = nf>0.5 ? '#1A5A1A' : '#3AAA3A';
+  var grassD = nf>0.5 ? '#145014' : '#2A8A2A';
+  var bladeC = nf>0.5 ? '#287028' : '#55CC55';
+  r(0, GROUND_Y, VW, VH-GROUND_Y, dirtC);
+  r(0, GROUND_Y, VW, GRASS_H,     grassC);
+  for (var gx=0; gx<VW; gx+=16) r(gx, GROUND_Y,   8, 8, grassD);
+  for (var hx=6; hx<VW; hx+=22) r(hx, GROUND_Y-5, 3, 9, bladeC);
+}
+
+// ─── Draw: splats ─────────────────────────────────────────
+function drawSplats() {
+  for (var i=0; i<splats.length; i++) {
+    var s = splats[i];
+    var alpha = 1 - s.age / 1.8;
+    var sz = Math.floor(s.sz * 0.55);
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.fillStyle = s.col;
+    ctx.fillRect(Math.round(s.x-sz),       Math.round(s.y),    sz*2, 3);
+    ctx.fillRect(Math.round(s.x-sz*0.5),   Math.round(s.y+3),  sz,   2);
+    ctx.fillRect(Math.round(s.x-sz*1.3),   Math.round(s.y-1),  4,    4);
+    ctx.fillRect(Math.round(s.x+sz*0.9),   Math.round(s.y-1),  4,    4);
+    ctx.fillRect(Math.round(s.x),           Math.round(s.y+5),  3,    3);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── Draw: apple shadows ──────────────────────────────────
+function drawShadows() {
+  for (var i=0; i<apples.length; i++) {
+    var a = apples[i];
+    if (a.bouncing) continue;
+    var heightAbove = Math.max(0, GROUND_Y - (a.y + a.size));
+    var scale = 1 - Math.min(heightAbove / (VH * 0.9), 0.88);
+    var sw = a.size * 1.7 * scale;
+    var sh = Math.max(1, a.size * 0.38 * scale);
+    ctx.globalAlpha = 0.38 * scale;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(Math.round(a.x - sw/2), GROUND_Y + 2, Math.round(sw), Math.round(sh));
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── Draw: apple ──────────────────────────────────────────
+function drawApple(a) {
+  var x = Math.round(a.x - a.size/2);
+  var y = Math.round(a.y);
+  var s = a.size;
+
+  if (a.type === 'shield') {
+    // Blue shield power-up
+    r(x+2,   y+2,   s-4, s-4, '#0055CC');
+    r(x,     y+4,   2,   s-8, '#0055CC');
+    r(x+s-2, y+4,   2,   s-8, '#0055CC');
+    r(x+4,   y,     s-8, 2,   '#0055CC');
+    r(x+4,   y+s-2, s-8, 2,   '#0055CC');
+    r(x+s-2, y+4,   2,   s-8, '#003A99');
+    r(x+4,   y+s-2, s-8, 2,   '#003A99');
+    r(x+4,   y+4,   4,   4,   '#4499FF'); // shine
+    // Cross / shield symbol
+    var mx = x + Math.floor(s/2);
+    r(mx-2, y+4,   4, s-8, '#AADDFF');
+    r(x+4,  y+Math.floor(s/2)-2, s-8, 4, '#AADDFF');
+    // Sparkles
+    r(x-4,  y+2,  3, 3, '#66BBFF');
+    r(x+s+2,y+4,  3, 3, '#66BBFF');
+    r(mx,   y-8,  3, 3, '#66BBFF');
+    return;
+  }
+
+  var gold  = a.type === 'golden';
+  var body  = gold ? '#FFAA00' : '#CC2200';
+  var dark  = gold ? '#BB7700' : '#991100';
+  var shine = gold ? '#FFE080' : '#FF5544';
+
+  r(x+2,   y+2,   s-4, s-4, body);
+  r(x,     y+4,   2,   s-8, body);
+  r(x+s-2, y+4,   2,   s-8, body);
+  r(x+4,   y,     s-8, 2,   body);
+  r(x+4,   y+s-2, s-8, 2,   body);
+  r(x+s-2, y+4,   2,   s-8, dark);
+  r(x+4,   y+s-2, s-8, 2,   dark);
+  var sh = s>12?4:2;
+  r(x+(s>12?4:2), y+(s>12?4:2), sh, sh, shine);
+
+  var stx = x + Math.floor(s/2) - 1;
+  r(stx, y-4, 3, 5, '#3A2800');
+  if (s>=16) r(stx+2, y-4, 6, 4, '#228B22');
+  else       r(stx+2, y-3, 4, 3, '#228B22');
+
+  if (gold) {
+    r(x-4,  y+2,  3, 3, '#FFEE44');
+    r(x+s+2,y+4,  3, 3, '#FFEE44');
+    r(x+Math.floor(s/2), y-8, 3, 3, '#FFEE44');
+  }
+}
+
+// ─── Draw: duck ───────────────────────────────────────────
+function drawDuck() {
+  var bx, by, scaleY=1;
+  if (state === 'dying') {
+    var t = deathT / 0.45;
+    scaleY = 1 - t * 0.88;
+    bx = Math.round(duck.x);
+    by = Math.round(duck.y + t * DUCK_H * 0.85);
+  } else {
+    bx = Math.round(duck.x);
+    by = Math.round(duck.y - duck.jumpOff);
+  }
+
+  ctx.save();
+
+  // Horizontal flip for direction
+  if (!duck.right) {
+    ctx.translate(bx + DUCK_W/2, 0);
+    ctx.scale(-1, 1);
+    ctx.translate(-(bx + DUCK_W/2), 0);
+  }
+
+  // Death squash (scale from bottom edge)
+  if (scaleY !== 1) {
+    ctx.translate(bx + DUCK_W/2, by + DUCK_H);
+    ctx.scale(1, scaleY);
+    ctx.translate(-(bx + DUCK_W/2), -(by + DUCK_H));
+  }
+
+  // Shield glow
+  if (shieldActive) {
+    var pulse = 0.35 + Math.sin(Date.now()/90) * 0.18;
+    ctx.globalAlpha = pulse;
+    r(bx-5, by-5, DUCK_W+10, DUCK_H+10, '#0066FF');
+    ctx.globalAlpha = 1;
+  }
+
+  // Duck body parts
+  r(bx,    by+11, 32, 18, '#FFD700');
+  r(bx+8,  by,    20, 15, '#FFD700');
+  r(bx+3,  by+14, 22, 10, '#E5BE00');
+  r(bx+2,  by+22, 22,  6, '#FFE840');
+  r(bx+28, by+5,   8,  5, '#FF8800');
+  r(bx+29, by+9,   7,  2, '#CC5500');
+  r(bx+22, by+4,   4,  4, '#111111');
+  r(bx+24, by+4,   2,  2, '#FFFFFF');
+
+  var ft = duck.jumping ? 0 : Math.sin(duck.walkAnim) * 2;
+  r(bx+4,  by+28+ft, 11, 3, '#FF8800');
+  r(bx+16, by+28-ft, 11, 3, '#FF8800');
+
+  ctx.restore();
+}
+
+// ─── Draw: HUD ────────────────────────────────────────────
+function drawHUD() {
+  ctx.font = 'bold 20px "Courier New", monospace';
+
+  // Score + high score
+  ctx.fillStyle='#000'; ctx.fillText('SCORE: '+score,    22, 38);
+  ctx.fillStyle='#FFF'; ctx.fillText('SCORE: '+score,    20, 36);
+  ctx.fillStyle='#000'; ctx.fillText('BEST: '+highScore, 22, 62);
+  ctx.fillStyle='#FFD700'; ctx.fillText('BEST: '+highScore, 20, 60);
+
+  // Level indicator
+  var lvl = Math.floor(gameTime/60)+1;
+  if (lvl > 1) {
+    var lt = 'LVL '+lvl, ltw = ctx.measureText(lt).width;
+    ctx.fillStyle='#000';    ctx.fillText(lt, VW-ltw-18, 38);
+    ctx.fillStyle='#FF8800'; ctx.fillText(lt, VW-ltw-20, 36);
+  }
+
+  // Combo building indicator (show when building toward ×2)
+  if (combo >= 5 && !comboX2) {
+    var ct = 'COMBO: '+combo+' / 10', ctw = ctx.measureText(ct).width;
+    ctx.fillStyle='#000';    ctx.fillText(ct, VW/2-ctw/2+2, 38);
+    ctx.fillStyle='#FFAA00'; ctx.fillText(ct, VW/2-ctw/2,   36);
+  }
+
+  // ×2 active badge (pulsing)
+  if (comboX2) {
+    var x2t = '\u00D72 SCORE!', x2w = ctx.measureText(x2t).width;
+    var x2p = 0.8 + Math.sin(Date.now()/130)*0.2;
+    ctx.globalAlpha = x2p;
+    ctx.fillStyle='#000';    ctx.fillText(x2t, VW/2-x2w/2+2, 38);
+    ctx.fillStyle='#FF4400'; ctx.fillText(x2t, VW/2-x2w/2,   36);
+    ctx.globalAlpha = 1;
+  }
+
+  // ×2 activation flash (large, fades over comboFlashT)
+  if (comboFlashT > 0) {
+    ctx.font = 'bold 34px "Courier New", monospace';
+    var ft2 = '10 COMBO! \u00D72 ACTIVATED!', ftw = ctx.measureText(ft2).width;
+    var fa  = Math.min(1, comboFlashT / 0.4);
+    ctx.globalAlpha = fa;
+    ctx.fillStyle='#000';    ctx.fillText(ft2, VW/2-ftw/2+3, VH/2-18+3);
+    ctx.fillStyle='#FF4400'; ctx.fillText(ft2, VW/2-ftw/2,   VH/2-18);
+    ctx.globalAlpha = 1;
+    ctx.font = 'bold 20px "Courier New", monospace';
+  }
+
+  // Shield indicator
+  if (shieldActive) {
+    var sp = 0.75 + Math.sin(Date.now()/180)*0.25;
+    ctx.globalAlpha = sp;
+    ctx.font = 'bold 18px "Courier New", monospace';
+    var st2 = 'SHIELD: '+Math.ceil(shieldTimer)+'s', stw = ctx.measureText(st2).width;
+    ctx.fillStyle='#000';    ctx.fillText(st2, VW-stw-18, 62);
+    ctx.fillStyle='#44AAFF'; ctx.fillText(st2, VW-stw-20, 60);
+    ctx.globalAlpha = 1;
+    ctx.font = 'bold 20px "Courier New", monospace';
+  }
+
+  // Wind indicator
+  if (windActive) {
+    var wt = (windVel>0 ? '>>> WIND >>>' : '<<< WIND <<<'), wtw = ctx.measureText(wt).width;
+    ctx.globalAlpha = Math.min(1, windTimer/0.5) * 0.85;
+    ctx.fillStyle = '#AADDFF';
+    ctx.fillText(wt, VW/2-wtw/2, VH-28);
+    ctx.globalAlpha = 1;
+  }
+
+  // Apple storm warning
+  if (rainWarnT > 0) {
+    ctx.font = 'bold 30px "Courier New", monospace';
+    var rt = '\u26A1 APPLE STORM! \u26A1', rtw = ctx.measureText(rt).width;
+    var ra = Math.min(1, rainWarnT/0.4) * (0.6 + Math.sin(Date.now()/75)*0.4);
+    ctx.globalAlpha = ra;
+    ctx.fillStyle='#000';    ctx.fillText(rt, VW/2-rtw/2+3, VH/2+3);
+    ctx.fillStyle='#FF6600'; ctx.fillText(rt, VW/2-rtw/2,   VH/2);
+    ctx.globalAlpha = 1;
+    ctx.font = 'bold 20px "Courier New", monospace';
+  }
+}
+
+// ─── Draw: death screen ───────────────────────────────────
+function drawDeathScreen() {
+  ctx.fillStyle = 'rgba(0,0,0,0.74)';
+  ctx.fillRect(0, 0, VW, VH);
+
+  ctx.font = 'bold 68px "Courier New", monospace';
+  var t1='YOU DIED', tw1=ctx.measureText(t1).width;
+  ctx.fillStyle='#660000'; ctx.fillText(t1, VW/2-tw1/2+4, VH/2-50+4);
+  ctx.fillStyle='#FF2222'; ctx.fillText(t1, VW/2-tw1/2,   VH/2-50);
+
+  ctx.font = 'bold 22px "Courier New", monospace';
+  var t2='SCORE: '+score, tw2=ctx.measureText(t2).width;
+  ctx.fillStyle='#BBBBBB'; ctx.fillText(t2, VW/2-tw2/2, VH/2+12);
+
+  if (score > 0 && score >= highScore) {
+    ctx.font = 'bold 18px "Courier New", monospace';
+    var t3='\u2605 NEW HIGH SCORE \u2605', tw3=ctx.measureText(t3).width;
+    ctx.fillStyle='#FFD700'; ctx.fillText(t3, VW/2-tw3/2, VH/2+44);
+  }
+
+  var bx=BTN.x, by=BTN.y, bw=BTN.w, bh=BTN.h;
+  r(bx+5, by+5, bw, bh, '#002800');
+  r(bx,   by,   bw, bh, '#005500');
+  r(bx,   by,   bw, 7,  '#00AA00');
+  r(bx,   by,   7,  bh, '#00AA00');
+  r(bx+bw-7, by+7,   7,    bh-7, '#003300');
+  r(bx+7,    by+bh-7, bw-7, 7,   '#003300');
+
+  ctx.font = 'bold 22px "Courier New", monospace';
+  var bt='RESPAWN', btw=ctx.measureText(bt).width;
+  ctx.fillStyle='#FFFFFF'; ctx.fillText(bt, VW/2-btw/2, by+35);
+}
+
+// ─── Main loop ────────────────────────────────────────────
+function loop(now) {
+  update(now);
+  ctx.imageSmoothingEnabled = false;
+
+  // Screen shake transform
+  if (shakeT > 0) {
+    var sx = (Math.random()-0.5)*shakeAmt*2;
+    var sy = (Math.random()-0.5)*shakeAmt*2;
+    ctx.save();
+    ctx.translate(sx, sy);
+  }
+
+  drawBG();
+  drawGround();
+  drawSplats();
+  drawShadows();
+  for (var i=0; i<apples.length; i++) drawApple(apples[i]);
+  drawDuck();
+  drawHUD();
+  if (state === 'dead') drawDeathScreen();
+
+  if (shakeT > 0) ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
