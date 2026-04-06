@@ -227,8 +227,9 @@ function resize() {
   canvas.width  = VW;
   canvas.height = VH;
 
-  // Update respawn button position
-  BTN.y = VH / 2 + 90;
+  // Keep duck pinned to ground and respawn button centred in play area
+  duck.y = GROUND_Y - DUCK_H;
+  BTN.y  = GROUND_Y / 2 + 90;
 }
 window.addEventListener('resize', () => requestAnimationFrame(resize));
 window.addEventListener('orientationchange', () => setTimeout(resize, 220));
