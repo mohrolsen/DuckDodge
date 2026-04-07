@@ -542,7 +542,7 @@ function update(now) {
   gameTime += dt;
 
   // Difficulty ramp
-  if (gameTime-lastDiffUp >= 60) {
+  if (gameTime-lastDiffUp >= 30) {
     lastDiffUp=gameTime; speedMult*=1.15; spawnMs=Math.max(380,spawnMs*0.87);
     for(var di=0;di<apples.length;di++) if(!apples[di].bouncing) apples[di].spd=APPLE_DEF[apples[di].type].spd*speedMult*GR;
   }
@@ -605,7 +605,7 @@ function update(now) {
   if(score>=rainMilestone){rainMilestone+=50;spawnRain();}
 
   // Skeleton spawn check
-  var lvl2=Math.floor(gameTime/60)+1;
+  var lvl2=Math.floor(gameTime/30)+1;
   if(!skeleton.active && lvl2>=2 && score>=skeletonMilestone){
     skeletonMilestone+=100;
     skeleton.active=true;
@@ -874,12 +874,12 @@ function drawHUD(){
   ctx.fillStyle='#000';ctx.fillText('BEST: '+highScore,22,62);
   ctx.fillStyle='#FFD700';ctx.fillText('BEST: '+highScore,20,60);
 
-  var lvl=Math.floor(gameTime/60)+1;
+  var lvl=Math.floor(gameTime/30)+1;
   var lt='LVL '+lvl,ltw=ctx.measureText(lt).width;
   ctx.font='bold 20px "Courier New", monospace';
   ctx.fillStyle='#000';ctx.fillText(lt,VW-ltw-18,38);
   ctx.fillStyle='#FF8800';ctx.fillText(lt,VW-ltw-20,36);
-  var secsToNext=Math.ceil(60-(gameTime%60));
+  var secsToNext=Math.ceil(30-(gameTime%30));
   ctx.font='bold 13px "Courier New", monospace';
   var cd='NEXT: '+secsToNext+'s',cdw=ctx.measureText(cd).width;
   ctx.fillStyle='#000';ctx.fillText(cd,VW-cdw-18,56);
