@@ -378,8 +378,12 @@ let deathT = 0;
 
 // Level tracking
 let currentLevel  = 1;    // tracks level-ups for difficulty scaling
-let pigHitActive  = false; // true during fake-death from pig collision
 let rainbowAlpha  = 0;     // 0–1 rainbow sky overlay when pig is active
+
+// "YOU GOT PIGGED" message
+let piggedMsgT  = 0;   // countdown timer (2.5s)
+let piggedMsgX  = 0;   // x position (from pig centre)
+let piggedMsgY  = 0;   // y start position, animates upward
 
 // Skeleton enemy
 let skeleton          = { active: false, x: 0, dir: 1, walkAnim: 0 };
@@ -503,7 +507,7 @@ function respawn() {
   skeleton={active:false,x:0,dir:1,walkAnim:0,type:'skeleton'};
   skeletonMilestone=100; stormAlpha=0; thunderFlashT=0; nextThunderT=0;
   applesPaused=false; appleResumeTs=0;
-  currentLevel=1; pigHitActive=false; rainbowAlpha=0;
+  currentLevel=1; rainbowAlpha=0; piggedMsgT=0; piggedMsgX=0; piggedMsgY=0;
   state='playing'; canvas.style.cursor='default';
   resetDuck();
 }
@@ -543,19 +547,7 @@ function update(now) {
   var dt = Math.min((now-lastTime)/1000, 0.05);
   lastTime = now;
 
-  if (state==='dying') {
-    deathT+=dt;
-    if (deathT>=0.45) {
-      if (pigHitActive) {
-        pigHitActive=false; shieldActive=true; shieldTimer=3;
-        skeleton.active=false; applesPaused=false;
-        stormAlpha=0; rainbowAlpha=0;
-        lastSpawnTs=performance.now();
-        state='playing';
-      } else { state='dead'; }
-    }
-    return;
-  }
+  if (state==='dying') { deathT+=dt; if(deathT>=0.45) state='dead'; return; }
   if (state!=='playing') return;
 
   gameTime += dt;
@@ -582,6 +574,7 @@ function update(now) {
 
   // Combo flash
   if (comboFlashT>0) comboFlashT-=dt;
+  if (piggedMsgT>0) { piggedMsgT-=dt; piggedMsgY-=120*dt; }
 
   // Wind
   if (!windActive && gameTime-lastWindT>=30) {
@@ -631,7 +624,7 @@ function update(now) {
   if(!skeleton.active && spawnLvl>=3 && score>=skeletonMilestone){
     skeletonMilestone+=100;
     skeleton.active=true;
-    skeleton.type=Math.random()<0.4?'pig':'skeleton';
+    skeleton.type=Math.random()<0.1?'pig':'skeleton';
     skeleton.dir=Math.random()<0.5?1:-1;
     skeleton.x=skeleton.dir===1?-SKEL_W:VW+SKEL_W;
     skeleton.walkAnim=0;
@@ -716,10 +709,17 @@ function update(now) {
     var dL2=duck.x+3,dR2=duck.x+DUCK_W-3;
     var dT2=duck.y-duck.jumpOff+3,dB2=duck.y-duck.jumpOff+DUCK_H-2;
     if(skR>dL2&&skL<dR2&&skB>dT2&&skT<dB2){
-      SND.death();
       if(skeleton.type==='pig'){
-        pigHitActive=true; state='dying'; deathT=0; return;
+        if(!skeleton.pigged){
+          skeleton.pigged=true;
+          shieldActive=true; shieldTimer=3;
+          SND.shield();
+          piggedMsgX=skeleton.x+SKEL_W/2;
+          piggedMsgY=GROUND_Y-SKEL_H-20;
+          piggedMsgT=2.5;
+        }
       } else {
+        SND.death();
         if(score>highScore){highScore=score;localStorage.setItem('duckAppleHS',highScore);}
         state='dying'; deathT=0; return;
       }
@@ -982,6 +982,14 @@ function drawHUD(){
     ctx.fillStyle='#000';ctx.fillText(st2,VW-stw-18,62);
     ctx.fillStyle='#44AAFF';ctx.fillText(st2,VW-stw-20,60);ctx.globalAlpha=1;
     ctx.font='bold 20px "Courier New", monospace';}
+
+  if(piggedMsgT>0){
+    ctx.font='bold 38px "Courier New", monospace';
+    var pgt='YOU GOT PIGGED!',pgtw=ctx.measureText(pgt).width;
+    var pga=Math.min(1,piggedMsgT/0.3);ctx.globalAlpha=pga;
+    ctx.fillStyle='#880044';ctx.fillText(pgt,VW/2-pgtw/2+3,piggedMsgY+3);
+    ctx.fillStyle='#FF44AA';ctx.fillText(pgt,VW/2-pgtw/2,piggedMsgY);
+    ctx.globalAlpha=1;ctx.font='bold 20px "Courier New", monospace';}
 
   if(windActive){var wt=windVel>0?'>>> WIND >>>':'<<< WIND <<<',wtw=ctx.measureText(wt).width;
     ctx.globalAlpha=Math.min(1,windTimer/0.5)*0.85;ctx.fillStyle='#AADDFF';
