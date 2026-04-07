@@ -243,6 +243,10 @@ const JUMP_H    = 48;
 const JUMP_DUR  = 0.46;
 const WIGGLE_CD = 20;   // B button cooldown (seconds)
 
+const SKEL_W   = 22;   // skeleton pixel width
+const SKEL_H   = 36;   // skeleton pixel height — must stay < JUMP_H (48) so player can clear it
+const SKEL_SPD = 250;  // always = DUCK_SPD, never scaled by speedMult
+
 const TREES = [
   { x:  85, th:  95, cw:  95, ch: 105 },
   { x: 235, th:  80, cw:  82, ch:  88 },
@@ -308,6 +312,10 @@ const SND = {
     setTimeout(()=>beep(220,0.1,'square',0.28,440),400);
   },
   wind:      () => beep(110, 0.6, 'sawtooth', 0.07, 260),
+  thunder:   () => {
+    beep(55, 0.7, 'sawtooth', 0.5, 25);
+    setTimeout(() => beep(80, 0.35, 'sawtooth', 0.3, 40), 180);
+  },
   wiggle:    () => {
     [523,659,784,659,784,1047].forEach((n,i) =>
       setTimeout(() => beep(n, 0.07, 'square', 0.2), i * 58));
@@ -367,6 +375,19 @@ let rainWarnT     = 0;
 
 // Death animation
 let deathT = 0;
+
+// Skeleton enemy
+let skeleton          = { active: false, x: 0, dir: 1, walkAnim: 0 };
+let skeletonMilestone = 100;   // next score threshold that triggers skeleton
+
+// Storm (active while skeleton is on screen)
+let stormAlpha    = 0;         // 0=normal sky, 1=full storm (fades in/out)
+let thunderFlashT = 0;         // brightness of current lightning flash
+let nextThunderT  = 0;         // countdown to next lightning strike
+
+// Apple pause
+let applesPaused  = false;
+let appleResumeTs = 0;
 
 // ─── Duck ─────────────────────────────────────────────────
 let duck = {};
@@ -473,6 +494,9 @@ function respawn() {
   wiggleActive=false; wiggleT=0; wiggleOff=0; wiggleCooldown=0;
   windActive=false; windVel=0; windTimer=0; lastWindT=0; windStreaks=[];
   shakeT=0; shakeAmt=0; rainMilestone=50; rainWarnT=0; deathT=0;
+  skeleton={active:false,x:0,dir:1,walkAnim:0};
+  skeletonMilestone=100; stormAlpha=0; thunderFlashT=0; nextThunderT=0;
+  applesPaused=false; appleResumeTs=0;
   state='playing'; canvas.style.cursor='default';
   resetDuck();
 }
@@ -575,10 +599,25 @@ function update(now) {
   }
 
   // Spawn
-  if(now-lastSpawnTs>=spawnMs) spawnApple(now);
+  if(!applesPaused && now-lastSpawnTs>=spawnMs) spawnApple(now);
 
   // Rain milestone
   if(score>=rainMilestone){rainMilestone+=50;spawnRain();}
+
+  // Skeleton spawn check
+  var lvl2=Math.floor(gameTime/60)+1;
+  if(!skeleton.active && lvl2>=2 && score>=skeletonMilestone){
+    skeletonMilestone+=100;
+    skeleton.active=true;
+    skeleton.dir=Math.random()<0.5?1:-1;
+    skeleton.x=skeleton.dir===1?-SKEL_W:VW+SKEL_W;
+    skeleton.walkAnim=0;
+    for(var ci=apples.length-1;ci>=0;ci--){addSplat(apples[ci]);apples.splice(ci,1);}
+    shieldOnScreen=false;
+    applesPaused=true;
+    stormAlpha=0;
+    nextThunderT=0.3+Math.random()*0.5;
+  }
 
   // Apple loop
   for(var i=apples.length-1;i>=0;i--){
@@ -623,6 +662,36 @@ function update(now) {
     }
   }
 
+  // Skeleton movement, storm, collision, exit
+  if(skeleton.active){
+    skeleton.x+=skeleton.dir*SKEL_SPD*dt;
+    skeleton.walkAnim+=dt*8;
+    if(stormAlpha<1) stormAlpha=Math.min(1,stormAlpha+dt*2.5);
+    if(thunderFlashT>0) thunderFlashT=Math.max(0,thunderFlashT-dt*8);
+    nextThunderT-=dt;
+    if(nextThunderT<=0){thunderFlashT=1;SND.thunder();nextThunderT=1.5+Math.random()*2.5;}
+    // Collision with duck
+    var skL=skeleton.x,skR=skeleton.x+SKEL_W;
+    var skT=GROUND_Y-SKEL_H,skB=GROUND_Y;
+    var dL2=duck.x+3,dR2=duck.x+DUCK_W-3;
+    var dT2=duck.y-duck.jumpOff+3,dB2=duck.y-duck.jumpOff+DUCK_H-2;
+    if(skR>dL2&&skL<dR2&&skB>dT2&&skT<dB2){
+      SND.death();
+      if(score>highScore){highScore=score;localStorage.setItem('duckAppleHS',highScore);}
+      state='dying';deathT=0;return;
+    }
+    // Exit check
+    var exited=(skeleton.dir===1&&skeleton.x>VW)||(skeleton.dir===-1&&skeleton.x<-SKEL_W);
+    if(exited){
+      skeleton.active=false;
+      applesPaused=false;
+      lastSpawnTs=performance.now();
+    }
+  } else {
+    if(stormAlpha>0) stormAlpha=Math.max(0,stormAlpha-dt*2);
+    thunderFlashT=0;
+  }
+
   for(var si=splats.length-1;si>=0;si--){splats[si].age+=dt;if(splats[si].age>=1.8)splats.splice(si,1);}
 }
 
@@ -657,6 +726,21 @@ function drawBG() {
       ctx.fillRect(Math.round(ws.x),Math.round(ws.y*GR),Math.round(d*ws.len),2);
       ctx.fillRect(Math.round(ws.x+d*18),Math.round(ws.y*GR+5),Math.round(d*ws.len*0.6),1);}}
   for(var ti=0;ti<TREES.length;ti++)drawTree(TREES[ti],nf);
+
+  // Storm overlay when skeleton is active
+  if(stormAlpha>0){
+    ctx.globalAlpha=stormAlpha*0.65;
+    r(0,0,VW,GROUND_Y,'#050510');
+    ctx.globalAlpha=1;
+    if(thunderFlashT>0){
+      ctx.globalAlpha=thunderFlashT*0.72;
+      r(0,0,VW,GROUND_Y,'#EEEEFF');
+      ctx.globalAlpha=1;
+      var bx2=150+Math.floor(Math.sin(gameTime*7)*300);
+      r(bx2,0,4,sy(100),'#FFFFAA');
+      r(bx2+6,sy(100),4,sy(80),'#FFFFAA');
+    }
+  }
 }
 function drawTree(t,nf){
   var x=t.x,th=t.th,cw=t.cw,ch=t.ch,tw=16,base=GROUND_Y,cx=x-cw/2,cy=base-th-ch+12;
@@ -753,6 +837,35 @@ function drawDuck(){
   ctx.restore();
 }
 
+// ─── Draw: skeleton ───────────────────────────────────────
+function drawSkeleton(){
+  if(!skeleton.active)return;
+  var sx=Math.round(skeleton.x),sy2=GROUND_Y-SKEL_H;
+  var bone='#E8E0C8',dark='#9A8870',eye='#1A1A2A';
+  ctx.save();
+  if(skeleton.dir===-1){ctx.translate(sx+SKEL_W/2,0);ctx.scale(-1,1);ctx.translate(-(sx+SKEL_W/2),0);}
+  // Skull
+  r(sx+3,sy2,   16,10,bone);r(sx+1,sy2+3,4,6,bone);r(sx+17,sy2+3,4,6,bone);
+  r(sx+5,sy2+2, 5,5,  eye); r(sx+12,sy2+2,5,5,eye);
+  r(sx+3,sy2+10,16,2, bone); // jaw
+  // Neck
+  r(sx+8,sy2+12,6,3,dark);
+  // Ribcage
+  r(sx+6,sy2+15,10,8,bone);
+  r(sx+2,sy2+16,4,2,dark);r(sx+16,sy2+16,4,2,dark);
+  r(sx+2,sy2+19,4,2,dark);r(sx+16,sy2+19,4,2,dark);
+  // Hips
+  r(sx+5,sy2+23,12,3,bone);
+  // Legs (walking anim)
+  var step=Math.round(Math.sin(skeleton.walkAnim)*3);
+  r(sx+5, sy2+26-step,4,10,bone);
+  r(sx+13,sy2+26+step,4,10,bone);
+  // Feet
+  r(sx+3, sy2+34-step,7,2,bone);
+  r(sx+12,sy2+34+step,7,2,bone);
+  ctx.restore();
+}
+
 // ─── Draw: HUD ────────────────────────────────────────────
 function drawHUD(){
   ctx.font='bold 20px "Courier New", monospace';
@@ -762,9 +875,16 @@ function drawHUD(){
   ctx.fillStyle='#FFD700';ctx.fillText('BEST: '+highScore,20,60);
 
   var lvl=Math.floor(gameTime/60)+1;
-  if(lvl>1){var lt='LVL '+lvl,ltw=ctx.measureText(lt).width;
-    ctx.fillStyle='#000';ctx.fillText(lt,VW-ltw-18,38);
-    ctx.fillStyle='#FF8800';ctx.fillText(lt,VW-ltw-20,36);}
+  var lt='LVL '+lvl,ltw=ctx.measureText(lt).width;
+  ctx.font='bold 20px "Courier New", monospace';
+  ctx.fillStyle='#000';ctx.fillText(lt,VW-ltw-18,38);
+  ctx.fillStyle='#FF8800';ctx.fillText(lt,VW-ltw-20,36);
+  var secsToNext=Math.ceil(60-(gameTime%60));
+  ctx.font='bold 13px "Courier New", monospace';
+  var cd='NEXT: '+secsToNext+'s',cdw=ctx.measureText(cd).width;
+  ctx.fillStyle='#000';ctx.fillText(cd,VW-cdw-18,56);
+  ctx.fillStyle='#AA6600';ctx.fillText(cd,VW-cdw-20,54);
+  ctx.font='bold 20px "Courier New", monospace';
 
   if(combo>=5&&!comboX2){var ct='COMBO: '+combo+' / 10',ctw=ctx.measureText(ct).width;
     ctx.fillStyle='#000';ctx.fillText(ct,VW/2-ctw/2+2,38);
@@ -853,6 +973,7 @@ function loop(now) {
 
   drawBG();drawGround();drawSplats();drawShadows();
   for(var i=0;i<apples.length;i++)drawApple(apples[i]);
+  drawSkeleton();
   drawDuck();drawHUD();
   if(state==='dead')drawDeathScreen();
 
