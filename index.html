@@ -246,6 +246,7 @@ const WIGGLE_CD = 20;   // B button cooldown (seconds)
 const SKEL_W   = 22;   // skeleton pixel width
 const SKEL_H   = 36;   // skeleton pixel height — must stay < JUMP_H (48) so player can clear it
 const SKEL_SPD = 250;  // always = DUCK_SPD, never scaled by speedMult
+const PIG_SPD  = 500;  // pig runs twice as fast as skeleton
 
 const TREES = [
   { x:  85, th:  95, cw:  95, ch: 105 },
@@ -335,7 +336,6 @@ let state       = 'playing';
 let score       = 0;
 let highScore   = parseInt(localStorage.getItem('duckAppleHS') || '0');
 let gameTime    = 0;
-let lastDiffUp  = 0;
 let speedMult   = 1.0;
 let spawnMs     = 1200;
 let lastSpawnTs = 0;
@@ -375,6 +375,11 @@ let rainWarnT     = 0;
 
 // Death animation
 let deathT = 0;
+
+// Level tracking
+let currentLevel  = 1;    // tracks level-ups for difficulty scaling
+let pigHitActive  = false; // true during fake-death from pig collision
+let rainbowAlpha  = 0;     // 0–1 rainbow sky overlay when pig is active
 
 // Skeleton enemy
 let skeleton          = { active: false, x: 0, dir: 1, walkAnim: 0 };
@@ -443,11 +448,12 @@ canvas.addEventListener('mousemove', function(e) {
 
 // ─── Apple helpers ────────────────────────────────────────
 function pickType() {
-  var rv = Math.random() * 100;
-  if (rv < 38) return 'small';
-  if (rv < 81) return 'normal';
-  if (rv < 95) return 'golden';
-  return shieldOnScreen ? 'small' : 'shield';
+  var lvl = Math.floor(score/50)+1;
+  var rv  = Math.random() * 100;
+  if (lvl >= 2 && rv < 38) return 'small';
+  if (rv < (lvl>=2 ? 81 : 74)) return 'normal';
+  if (rv < (lvl>=2 ? 95 : 93)) return 'golden';
+  return shieldOnScreen ? 'normal' : 'shield';
 }
 function makeApple(type, xPos, startY) {
   const D = APPLE_DEF[type];
@@ -487,16 +493,17 @@ function activateWiggle() {
 
 // ─── Respawn ──────────────────────────────────────────────
 function respawn() {
-  score=0; gameTime=0; lastDiffUp=0; speedMult=1.0;
+  score=0; gameTime=0; speedMult=1.0;
   spawnMs=1200; lastSpawnTs=0; apples=[]; splats=[];
   combo=0; comboX2=false; comboFlashT=0;
   shieldActive=false; shieldTimer=0; shieldOnScreen=false;
   wiggleActive=false; wiggleT=0; wiggleOff=0; wiggleCooldown=0;
   windActive=false; windVel=0; windTimer=0; lastWindT=0; windStreaks=[];
   shakeT=0; shakeAmt=0; rainMilestone=50; rainWarnT=0; deathT=0;
-  skeleton={active:false,x:0,dir:1,walkAnim:0};
+  skeleton={active:false,x:0,dir:1,walkAnim:0,type:'skeleton'};
   skeletonMilestone=100; stormAlpha=0; thunderFlashT=0; nextThunderT=0;
   applesPaused=false; appleResumeTs=0;
+  currentLevel=1; pigHitActive=false; rainbowAlpha=0;
   state='playing'; canvas.style.cursor='default';
   resetDuck();
 }
@@ -536,14 +543,29 @@ function update(now) {
   var dt = Math.min((now-lastTime)/1000, 0.05);
   lastTime = now;
 
-  if (state==='dying') { deathT+=dt; if(deathT>=0.45) state='dead'; return; }
+  if (state==='dying') {
+    deathT+=dt;
+    if (deathT>=0.45) {
+      if (pigHitActive) {
+        pigHitActive=false; shieldActive=true; shieldTimer=3;
+        skeleton.active=false; applesPaused=false;
+        stormAlpha=0; rainbowAlpha=0;
+        lastSpawnTs=performance.now();
+        state='playing';
+      } else { state='dead'; }
+    }
+    return;
+  }
   if (state!=='playing') return;
 
   gameTime += dt;
 
-  // Difficulty ramp
-  if (gameTime-lastDiffUp >= 30) {
-    lastDiffUp=gameTime; speedMult*=1.15; spawnMs=Math.max(380,spawnMs*0.87);
+  // Difficulty ramp — score-based, +5% per level
+  var newLvl=Math.floor(score/50)+1;
+  if(newLvl>currentLevel){
+    currentLevel=newLvl;
+    speedMult=Math.pow(1.05,currentLevel-1);
+    spawnMs=Math.max(380,Math.round(1200*Math.pow(0.95,currentLevel-1)));
     for(var di=0;di<apples.length;di++) if(!apples[di].bouncing) apples[di].spd=APPLE_DEF[apples[di].type].spd*speedMult*GR;
   }
 
@@ -604,18 +626,19 @@ function update(now) {
   // Rain milestone
   if(score>=rainMilestone){rainMilestone+=50;spawnRain();}
 
-  // Skeleton spawn check
-  var lvl2=Math.floor(gameTime/30)+1;
-  if(!skeleton.active && lvl2>=2 && score>=skeletonMilestone){
+  // Skeleton/pig spawn check
+  var spawnLvl=Math.floor(score/50)+1;
+  if(!skeleton.active && spawnLvl>=3 && score>=skeletonMilestone){
     skeletonMilestone+=100;
     skeleton.active=true;
+    skeleton.type=Math.random()<0.4?'pig':'skeleton';
     skeleton.dir=Math.random()<0.5?1:-1;
     skeleton.x=skeleton.dir===1?-SKEL_W:VW+SKEL_W;
     skeleton.walkAnim=0;
     for(var ci=apples.length-1;ci>=0;ci--){addSplat(apples[ci]);apples.splice(ci,1);}
     shieldOnScreen=false;
     applesPaused=true;
-    stormAlpha=0;
+    stormAlpha=0; rainbowAlpha=0;
     nextThunderT=0.3+Math.random()*0.5;
   }
 
@@ -648,6 +671,18 @@ function update(now) {
     // Ground hit
     if(!a.bouncing&&a.y+a.size>=GROUND_Y){
       if(a.type==='shield'){shieldOnScreen=false;addSplat(a);apples.splice(i,1);continue;}
+      // Golden apple explosion (5% chance)
+      if(a.type==='golden'&&Math.random()<0.05){
+        var eTypes=['shield','golden','normal','normal'];
+        for(var ei=0;ei<4;ei++){
+          var et=eTypes[ei];
+          if(et==='shield'&&shieldOnScreen) et='normal';
+          var ex=a.x+(Math.random()-0.5)*160;
+          ex=Math.max(20,Math.min(VW-20,ex));
+          apples.push(makeApple(et,ex,-20-Math.random()*80));
+        }
+        SND.golden();SND.milestone();addSplat(a);apples.splice(i,1);continue;
+      }
       var prev=score;
       score+=a.pts*(comboX2?2:1);
       combo++;
@@ -662,14 +697,19 @@ function update(now) {
     }
   }
 
-  // Skeleton movement, storm, collision, exit
+  // Skeleton/pig movement, sky, collision, exit
   if(skeleton.active){
-    skeleton.x+=skeleton.dir*SKEL_SPD*dt;
-    skeleton.walkAnim+=dt*8;
-    if(stormAlpha<1) stormAlpha=Math.min(1,stormAlpha+dt*2.5);
-    if(thunderFlashT>0) thunderFlashT=Math.max(0,thunderFlashT-dt*8);
-    nextThunderT-=dt;
-    if(nextThunderT<=0){thunderFlashT=1;SND.thunder();nextThunderT=1.5+Math.random()*2.5;}
+    var spd2=skeleton.type==='pig'?PIG_SPD:SKEL_SPD;
+    skeleton.x+=skeleton.dir*spd2*dt;
+    skeleton.walkAnim+=dt*(skeleton.type==='pig'?14:8);
+    if(skeleton.type==='skeleton'){
+      if(stormAlpha<1) stormAlpha=Math.min(1,stormAlpha+dt*2.5);
+      if(thunderFlashT>0) thunderFlashT=Math.max(0,thunderFlashT-dt*8);
+      nextThunderT-=dt;
+      if(nextThunderT<=0){thunderFlashT=1;SND.thunder();nextThunderT=1.5+Math.random()*2.5;}
+    } else {
+      if(rainbowAlpha<1) rainbowAlpha=Math.min(1,rainbowAlpha+dt*2.5);
+    }
     // Collision with duck
     var skL=skeleton.x,skR=skeleton.x+SKEL_W;
     var skT=GROUND_Y-SKEL_H,skB=GROUND_Y;
@@ -677,18 +717,21 @@ function update(now) {
     var dT2=duck.y-duck.jumpOff+3,dB2=duck.y-duck.jumpOff+DUCK_H-2;
     if(skR>dL2&&skL<dR2&&skB>dT2&&skT<dB2){
       SND.death();
-      if(score>highScore){highScore=score;localStorage.setItem('duckAppleHS',highScore);}
-      state='dying';deathT=0;return;
+      if(skeleton.type==='pig'){
+        pigHitActive=true; state='dying'; deathT=0; return;
+      } else {
+        if(score>highScore){highScore=score;localStorage.setItem('duckAppleHS',highScore);}
+        state='dying'; deathT=0; return;
+      }
     }
     // Exit check
     var exited=(skeleton.dir===1&&skeleton.x>VW)||(skeleton.dir===-1&&skeleton.x<-SKEL_W);
     if(exited){
-      skeleton.active=false;
-      applesPaused=false;
-      lastSpawnTs=performance.now();
+      skeleton.active=false; applesPaused=false; lastSpawnTs=performance.now();
     }
   } else {
     if(stormAlpha>0) stormAlpha=Math.max(0,stormAlpha-dt*2);
+    if(rainbowAlpha>0) rainbowAlpha=Math.max(0,rainbowAlpha-dt*2);
     thunderFlashT=0;
   }
 
@@ -726,6 +769,17 @@ function drawBG() {
       ctx.fillRect(Math.round(ws.x),Math.round(ws.y*GR),Math.round(d*ws.len),2);
       ctx.fillRect(Math.round(ws.x+d*18),Math.round(ws.y*GR+5),Math.round(d*ws.len*0.6),1);}}
   for(var ti=0;ti<TREES.length;ti++)drawTree(TREES[ti],nf);
+
+  // Rainbow overlay when pig is active
+  if(rainbowAlpha>0){
+    var rbColors=['#FF2222','#FF8800','#FFFF00','#22CC22','#2255FF','#9922CC'];
+    var bandH=Math.round(GROUND_Y/6);
+    for(var ri=0;ri<6;ri++){
+      ctx.globalAlpha=rainbowAlpha*0.42;
+      r(0,ri*bandH,VW,bandH+1,rbColors[ri]);
+    }
+    ctx.globalAlpha=1;
+  }
 
   // Storm overlay when skeleton is active
   if(stormAlpha>0){
@@ -837,32 +891,52 @@ function drawDuck(){
   ctx.restore();
 }
 
-// ─── Draw: skeleton ───────────────────────────────────────
+// ─── Draw: skeleton / pig ─────────────────────────────────
 function drawSkeleton(){
   if(!skeleton.active)return;
   var sx=Math.round(skeleton.x),sy2=GROUND_Y-SKEL_H;
-  var bone='#E8E0C8',dark='#9A8870',eye='#1A1A2A';
   ctx.save();
   if(skeleton.dir===-1){ctx.translate(sx+SKEL_W/2,0);ctx.scale(-1,1);ctx.translate(-(sx+SKEL_W/2),0);}
-  // Skull
-  r(sx+3,sy2,   16,10,bone);r(sx+1,sy2+3,4,6,bone);r(sx+17,sy2+3,4,6,bone);
-  r(sx+5,sy2+2, 5,5,  eye); r(sx+12,sy2+2,5,5,eye);
-  r(sx+3,sy2+10,16,2, bone); // jaw
-  // Neck
-  r(sx+8,sy2+12,6,3,dark);
-  // Ribcage
-  r(sx+6,sy2+15,10,8,bone);
-  r(sx+2,sy2+16,4,2,dark);r(sx+16,sy2+16,4,2,dark);
-  r(sx+2,sy2+19,4,2,dark);r(sx+16,sy2+19,4,2,dark);
-  // Hips
-  r(sx+5,sy2+23,12,3,bone);
-  // Legs (walking anim)
-  var step=Math.round(Math.sin(skeleton.walkAnim)*3);
-  r(sx+5, sy2+26-step,4,10,bone);
-  r(sx+13,sy2+26+step,4,10,bone);
-  // Feet
-  r(sx+3, sy2+34-step,7,2,bone);
-  r(sx+12,sy2+34+step,7,2,bone);
+  if(skeleton.type==='pig'){
+    var pig='#FF99AA',pigD='#CC6677',pigN='#FF4466';
+    // Body
+    r(sx+2,sy2+10,18,16,pig);r(sx,sy2+14,22,10,pig);
+    // Head
+    r(sx+4,sy2,14,12,pig);r(sx+2,sy2+3,4,7,pig);r(sx+16,sy2+3,4,7,pig);
+    // Floppy ears
+    r(sx+3,sy2-4,5,7,pigD);r(sx+14,sy2-4,5,7,pigD);
+    // Eyes
+    r(sx+6,sy2+3,3,3,'#221122');r(sx+13,sy2+3,3,3,'#221122');
+    // Snout
+    r(sx+6,sy2+7,10,6,pigN);
+    r(sx+7,sy2+8,3,3,'#441122');r(sx+12,sy2+8,3,3,'#441122');
+    // Legs (walking anim)
+    var pstep=Math.round(Math.sin(skeleton.walkAnim)*3);
+    r(sx+3, sy2+24-pstep,5,12,pig);r(sx+14,sy2+24+pstep,5,12,pig);
+    // Feet
+    r(sx+1, sy2+34-pstep,8,2,pigD);r(sx+13,sy2+34+pstep,8,2,pigD);
+    // Curly tail
+    r(sx+20,sy2+12,3,3,pigD);r(sx+22,sy2+14,2,3,pigD);
+  } else {
+    var bone='#E8E0C8',dark='#9A8870',eye='#1A1A2A';
+    // Skull
+    r(sx+3,sy2,   16,10,bone);r(sx+1,sy2+3,4,6,bone);r(sx+17,sy2+3,4,6,bone);
+    r(sx+5,sy2+2, 5,5,  eye); r(sx+12,sy2+2,5,5,eye);
+    r(sx+3,sy2+10,16,2, bone); // jaw
+    // Neck
+    r(sx+8,sy2+12,6,3,dark);
+    // Ribcage
+    r(sx+6,sy2+15,10,8,bone);
+    r(sx+2,sy2+16,4,2,dark);r(sx+16,sy2+16,4,2,dark);
+    r(sx+2,sy2+19,4,2,dark);r(sx+16,sy2+19,4,2,dark);
+    // Hips
+    r(sx+5,sy2+23,12,3,bone);
+    // Legs (walking anim)
+    var step=Math.round(Math.sin(skeleton.walkAnim)*3);
+    r(sx+5, sy2+26-step,4,10,bone);r(sx+13,sy2+26+step,4,10,bone);
+    // Feet
+    r(sx+3, sy2+34-step,7,2,bone);r(sx+12,sy2+34+step,7,2,bone);
+  }
   ctx.restore();
 }
 
@@ -874,14 +948,14 @@ function drawHUD(){
   ctx.fillStyle='#000';ctx.fillText('BEST: '+highScore,22,62);
   ctx.fillStyle='#FFD700';ctx.fillText('BEST: '+highScore,20,60);
 
-  var lvl=Math.floor(gameTime/30)+1;
+  var lvl=Math.floor(score/50)+1;
   var lt='LVL '+lvl,ltw=ctx.measureText(lt).width;
   ctx.font='bold 20px "Courier New", monospace';
   ctx.fillStyle='#000';ctx.fillText(lt,VW-ltw-18,38);
   ctx.fillStyle='#FF8800';ctx.fillText(lt,VW-ltw-20,36);
-  var secsToNext=Math.ceil(30-(gameTime%30));
+  var ptsToNext=50-(score%50);
   ctx.font='bold 13px "Courier New", monospace';
-  var cd='NEXT: '+secsToNext+'s',cdw=ctx.measureText(cd).width;
+  var cd='NEXT: '+ptsToNext+'pts',cdw=ctx.measureText(cd).width;
   ctx.fillStyle='#000';ctx.fillText(cd,VW-cdw-18,56);
   ctx.fillStyle='#AA6600';ctx.fillText(cd,VW-cdw-20,54);
   ctx.font='bold 20px "Courier New", monospace';
