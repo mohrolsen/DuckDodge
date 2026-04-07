@@ -556,7 +556,7 @@ function update(now) {
   var newLvl=Math.floor(score/50)+1;
   if(newLvl>currentLevel){
     currentLevel=newLvl;
-    speedMult=Math.pow(1.05,currentLevel-1);
+    speedMult=Math.pow(1.075,currentLevel-1);
     spawnMs=Math.max(380,Math.round(1200*Math.pow(0.95,currentLevel-1)));
     for(var di=0;di<apples.length;di++) if(!apples[di].bouncing) apples[di].spd=APPLE_DEF[apples[di].type].spd*speedMult*GR;
   }
