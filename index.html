@@ -616,8 +616,8 @@ function update(now) {
   // Spawn
   if(!applesPaused && now-lastSpawnTs>=spawnMs) spawnApple(now);
 
-  // Rain milestone
-  if(score>=rainMilestone){rainMilestone+=50;spawnRain();}
+  // Rain milestone — skip while skeleton/pig is on screen
+  if(!skeleton.active && score>=rainMilestone){rainMilestone+=50;spawnRain();}
 
   // Skeleton/pig spawn check
   var spawnLvl=Math.floor(score/50)+1;
@@ -728,6 +728,7 @@ function update(now) {
     var exited=(skeleton.dir===1&&skeleton.x>VW)||(skeleton.dir===-1&&skeleton.x<-SKEL_W);
     if(exited){
       skeleton.active=false; applesPaused=false; lastSpawnTs=performance.now();
+      if(score>=rainMilestone) rainMilestone=score+5;
     }
   } else {
     if(stormAlpha>0) stormAlpha=Math.max(0,stormAlpha-dt*2);
